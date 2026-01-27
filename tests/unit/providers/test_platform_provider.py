@@ -1121,3 +1121,114 @@ async def test_usage_event_includes_version_header(
 
     assert "User-Agent" in headers
     assert headers["User-Agent"] == f"python-any-llm/{__version__}"
+
+
+# Tests for mzai provider with JWT token authentication
+
+
+@patch("any_llm_platform_client.AnyLLMPlatformClient._aensure_valid_token")
+def test_platform_provider_with_mzai_fetches_token(
+    mock_ensure_token: AsyncMock,
+    any_llm_key: str,
+) -> None:
+    """Test that mzai provider fetches JWT token instead of decrypted provider key."""
+    from any_llm.providers.mzai import MzaiProvider
+
+    mock_ensure_token.return_value = "mock-jwt-token-12345"
+
+    provider_instance = PlatformProvider(api_key=any_llm_key)
+    provider_instance.provider = MzaiProvider
+
+    assert provider_instance.PROVIDER_NAME == "platform"
+    assert provider_instance.provider.PROVIDER_NAME == "mzai"
+    assert provider_instance.provider_key_id is None
+    assert provider_instance.project_id is None
+
+    mock_ensure_token.assert_called_once_with(any_llm_key)
+
+
+@patch("any_llm_platform_client.AnyLLMPlatformClient._aensure_valid_token")
+def test_platform_provider_mzai_passes_token_to_provider(
+    mock_ensure_token: AsyncMock,
+    any_llm_key: str,
+) -> None:
+    """Test that the JWT token is passed as api_key to MzaiProvider."""
+    from any_llm.providers.mzai import MzaiProvider
+
+    mock_ensure_token.return_value = "mock-jwt-token-12345"
+
+    provider_instance = PlatformProvider(api_key=any_llm_key)
+    provider_instance.provider = MzaiProvider
+
+    # The underlying provider should have the JWT token as its API key
+    assert provider_instance.provider.client.api_key == "mock-jwt-token-12345"
+
+
+@pytest.mark.asyncio
+@patch("any_llm_platform_client.AnyLLMPlatformClient._aensure_valid_token")
+@patch("any_llm.providers.platform.platform.post_completion_usage_event")
+async def test_platform_provider_mzai_skips_usage_events_non_streaming(
+    mock_post_usage: AsyncMock,
+    mock_ensure_token: AsyncMock,
+    any_llm_key: str,
+    mock_completion: ChatCompletion,
+) -> None:
+    """Test that usage events are skipped for mzai provider (non-streaming)."""
+    from any_llm.providers.mzai import MzaiProvider
+
+    mock_ensure_token.return_value = "mock-jwt-token-12345"
+
+    provider_instance = PlatformProvider(api_key=any_llm_key)
+    provider_instance.provider = MzaiProvider
+    provider_instance.provider._acompletion = AsyncMock(return_value=mock_completion)  # type: ignore[method-assign]
+
+    params = CompletionParams(
+        model_id="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": "Hello"}],
+        stream=False,
+    )
+
+    result = await provider_instance._acompletion(params)
+
+    assert result == mock_completion
+    mock_post_usage.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("any_llm_platform_client.AnyLLMPlatformClient._aensure_valid_token")
+@patch("any_llm.providers.platform.platform.post_completion_usage_event")
+async def test_platform_provider_mzai_skips_usage_events_streaming(
+    mock_post_usage: AsyncMock,
+    mock_ensure_token: AsyncMock,
+    any_llm_key: str,
+    mock_streaming_chunks: list[ChatCompletionChunk],
+) -> None:
+    """Test that usage events are skipped for mzai provider (streaming)."""
+    from any_llm.providers.mzai import MzaiProvider
+
+    mock_ensure_token.return_value = "mock-jwt-token-12345"
+
+    provider_instance = PlatformProvider(api_key=any_llm_key)
+    provider_instance.provider = MzaiProvider
+
+    async def mock_stream() -> AsyncIterator[ChatCompletionChunk]:
+        for chunk in mock_streaming_chunks:
+            yield chunk
+
+    provider_instance.provider._acompletion = AsyncMock(return_value=mock_stream())  # type: ignore[method-assign]
+
+    params = CompletionParams(
+        model_id="openai/gpt-oss-120b",
+        messages=[{"role": "user", "content": "Hello"}],
+        stream=True,
+    )
+
+    result = await provider_instance._acompletion(params)
+
+    # Consume the stream
+    chunks = []
+    async for chunk in result:  # type: ignore[union-attr]
+        chunks.append(chunk)
+
+    assert len(chunks) == len(mock_streaming_chunks)
+    mock_post_usage.assert_not_called()

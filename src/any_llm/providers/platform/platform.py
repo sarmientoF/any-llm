@@ -131,16 +131,17 @@ class PlatformProvider(AnyLLM):
             end_time = time.perf_counter()
             total_duration_ms = (end_time - start_time) * 1000
 
-            await post_completion_usage_event(
-                platform_client=self.platform_client,
-                client=self.client,
-                any_llm_key=self.any_llm_key,  # type: ignore[arg-type]
-                provider=self.provider.PROVIDER_NAME,
-                completion=cast("ChatCompletion", completion),
-                provider_key_id=self.provider_key_id,  # type: ignore[arg-type]
-                client_name=self.client_name,
-                total_duration_ms=total_duration_ms,
-            )
+            if self.provider_key_id is not None:
+                await post_completion_usage_event(
+                    platform_client=self.platform_client,
+                    client=self.client,
+                    any_llm_key=self.any_llm_key,  # type: ignore[arg-type]
+                    provider=self.provider.PROVIDER_NAME,
+                    completion=cast("ChatCompletion", completion),
+                    provider_key_id=self.provider_key_id,
+                    client_name=self.client_name,
+                    total_duration_ms=total_duration_ms,
+                )
             return completion
 
         # For streaming, wrap the iterator to collect usage info
@@ -216,22 +217,24 @@ class PlatformProvider(AnyLLM):
             # Calculate inter-chunk latency variance
             if len(chunk_latencies) > 1:
                 inter_chunk_latency_variance_ms = statistics.variance(chunk_latencies)
-            await post_completion_usage_event(
-                platform_client=self.platform_client,
-                client=self.client,
-                any_llm_key=self.any_llm_key,  # type: ignore [arg-type]
-                provider=self.provider.PROVIDER_NAME,
-                completion=final_completion,
-                provider_key_id=self.provider_key_id,  # type: ignore[arg-type]
-                client_name=self.client_name,
-                time_to_first_token_ms=time_to_first_token_ms,
-                time_to_last_token_ms=time_to_last_token_ms,
-                total_duration_ms=total_duration_ms,
-                tokens_per_second=tokens_per_second,
-                chunks_received=chunks_received,
-                avg_chunk_size=avg_chunk_size,
-                inter_chunk_latency_variance_ms=inter_chunk_latency_variance_ms,
-            )
+
+            if self.provider_key_id is not None:
+                await post_completion_usage_event(
+                    platform_client=self.platform_client,
+                    client=self.client,
+                    any_llm_key=self.any_llm_key,  # type: ignore [arg-type]
+                    provider=self.provider.PROVIDER_NAME,
+                    completion=final_completion,
+                    provider_key_id=self.provider_key_id,
+                    client_name=self.client_name,
+                    time_to_first_token_ms=time_to_first_token_ms,
+                    time_to_last_token_ms=time_to_last_token_ms,
+                    total_duration_ms=total_duration_ms,
+                    tokens_per_second=tokens_per_second,
+                    chunks_received=chunks_received,
+                    avg_chunk_size=avg_chunk_size,
+                    inter_chunk_latency_variance_ms=inter_chunk_latency_variance_ms,
+                )
 
     def _combine_chunks(self, chunks: list[ChatCompletionChunk]) -> ChatCompletion:
         """Combine streaming chunks into a ChatCompletion for usage tracking."""
@@ -275,9 +278,19 @@ class PlatformProvider(AnyLLM):
         if self.any_llm_key is None:
             msg = "any_llm_key is required for platform provider"
             raise ValueError(msg)
-        provider_key_result = self.platform_client.get_decrypted_provider_key(
-            any_llm_key=self.any_llm_key, provider=provider_class.PROVIDER_NAME
-        )
-        self.provider_key_id = str(provider_key_result.provider_key_id)
-        self.project_id = str(provider_key_result.project_id)
-        self._provider = provider_class(api_key=provider_key_result.api_key, api_base=self.api_base, **self.kwargs)
+
+        if provider_class.PROVIDER_NAME == LLMProvider.MZAI.value:
+            # For mzai, use JWT token directly as API key
+            from any_llm.utils.aio import run_async_in_sync
+
+            token = run_async_in_sync(self.platform_client._aensure_valid_token(self.any_llm_key))
+            self.provider_key_id = None
+            self.project_id = None
+            self._provider = provider_class(api_key=token, api_base=self.api_base, **self.kwargs)
+        else:
+            provider_key_result = self.platform_client.get_decrypted_provider_key(
+                any_llm_key=self.any_llm_key, provider=provider_class.PROVIDER_NAME
+            )
+            self.provider_key_id = str(provider_key_result.provider_key_id)
+            self.project_id = str(provider_key_result.project_id)
+            self._provider = provider_class(api_key=provider_key_result.api_key, api_base=self.api_base, **self.kwargs)
