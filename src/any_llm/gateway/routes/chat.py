@@ -75,6 +75,29 @@ def _get_provider_kwargs(
     return kwargs
 
 
+_MAX_COMPLETION_TOKENS_MODELS = ("o1", "o3", "o4", "gpt-5")
+_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5")
+
+
+def _normalize_params(kwargs: dict[str, Any], model: str) -> None:
+    """Fix provider-specific param quirks before calling acompletion.
+
+    - max_tokens → max_completion_tokens for o-series / gpt-5
+    - Drop temperature for models that only accept default (1)
+    """
+    bare = model.split("/")[-1].lower() if "/" in model else model.lower()
+
+    if (
+        "max_tokens" in kwargs
+        and "max_completion_tokens" not in kwargs
+        and any(bare.startswith(p) for p in _MAX_COMPLETION_TOKENS_MODELS)
+    ):
+        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+
+    if "temperature" in kwargs and any(bare.startswith(p) for p in _FIXED_TEMPERATURE_MODELS):
+        kwargs.pop("temperature")
+
+
 async def _log_usage(
     db: Session,
     api_key_obj: APIKey | None,
@@ -195,6 +218,7 @@ async def chat_completions(
 
     completion_kwargs = request.model_dump(exclude_none=True)
     completion_kwargs.update(provider_kwargs)
+    _normalize_params(completion_kwargs, model)
 
     try:
         if request.stream:
