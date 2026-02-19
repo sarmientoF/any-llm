@@ -16,7 +16,6 @@ from any_llm.gateway.budget import validate_user_budget
 from any_llm.gateway.config import GatewayConfig
 from any_llm.gateway.db import APIKey, ModelPricing, UsageLog, User, get_db
 from any_llm.gateway.log_config import logger
-from any_llm.gateway.param_rules import normalize_params
 from any_llm.gateway.retry import call_with_retry_and_fallback
 from any_llm.types.completion import ChatCompletion, ChatCompletionChunk, CompletionUsage
 
@@ -217,7 +216,6 @@ async def chat_completions(
     completion_kwargs.update(provider_kwargs)
     # Replace request model with resolved model for acompletion
     completion_kwargs["model"] = resolved_model
-    normalize_params(completion_kwargs, model, provider.value)
 
     # Cache check (non-streaming only)
     cache: ResponseCache | None = getattr(config, "_cache", None)

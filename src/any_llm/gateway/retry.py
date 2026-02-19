@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from any_llm import AnyLLM, acompletion
 from any_llm.gateway.log_config import logger
-from any_llm.gateway.param_rules import normalize_params
 
 if TYPE_CHECKING:
     from any_llm.gateway.circuit_breaker import CircuitBreaker
@@ -42,7 +41,6 @@ async def call_with_retry_and_fallback(
         for attempt in range(1, retry_cfg.max_retries + 1):
             try:
                 kwargs = {**completion_kwargs, "model": candidate}
-                normalize_params(kwargs, bare_model, provider_str)
                 response: ChatCompletion = await acompletion(**kwargs)  # type: ignore[assignment]
             except Exception as e:
                 last_exc = e
