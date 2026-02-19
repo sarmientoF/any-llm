@@ -1,9 +1,11 @@
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from any_llm.gateway import __version__
+from any_llm.gateway.auth.dependencies import get_config
+from any_llm.gateway.config import GatewayConfig
 from any_llm.gateway.db import get_db
 
 router = APIRouter(prefix="/health", tags=["health"])
@@ -80,3 +82,14 @@ async def health_readiness() -> dict[str, Any]:
         "database": db_status,
         "version": __version__,
     }
+
+
+@router.get("/providers")
+async def provider_status(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+) -> dict[str, Any]:
+    """Return circuit breaker status for each provider."""
+    cb = getattr(config, "_circuit_breaker", None)
+    if cb is None:
+        return {"providers": {}}
+    return {"providers": cb.get_status()}

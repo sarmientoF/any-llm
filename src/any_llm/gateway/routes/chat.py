@@ -1,7 +1,7 @@
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -16,7 +16,13 @@ from any_llm.gateway.budget import validate_user_budget
 from any_llm.gateway.config import GatewayConfig
 from any_llm.gateway.db import APIKey, ModelPricing, UsageLog, User, get_db
 from any_llm.gateway.log_config import logger
+from any_llm.gateway.param_rules import normalize_params
+from any_llm.gateway.retry import call_with_retry_and_fallback
 from any_llm.types.completion import ChatCompletion, ChatCompletionChunk, CompletionUsage
+
+if TYPE_CHECKING:
+    from any_llm.gateway.cache import ResponseCache
+    from any_llm.gateway.rate_limiter import RateLimiter
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 
@@ -73,29 +79,6 @@ def _get_provider_kwargs(
                 kwargs["client_args"] = provider_config["client_args"]
 
     return kwargs
-
-
-_MAX_COMPLETION_TOKENS_MODELS = ("o1", "o3", "o4", "gpt-5")
-_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5")
-
-
-def _normalize_params(kwargs: dict[str, Any], model: str) -> None:
-    """Fix provider-specific param quirks before calling acompletion.
-
-    - max_tokens → max_completion_tokens for o-series / gpt-5
-    - Drop temperature for models that only accept default (1)
-    """
-    bare = model.split("/")[-1].lower() if "/" in model else model.lower()
-
-    if (
-        "max_tokens" in kwargs
-        and "max_completion_tokens" not in kwargs
-        and any(bare.startswith(p) for p in _MAX_COMPLETION_TOKENS_MODELS)
-    ):
-        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
-
-    if "temperature" in kwargs and any(bare.startswith(p) for p in _FIXED_TEMPERATURE_MODELS):
-        kwargs.pop("temperature")
 
 
 async def _log_usage(
@@ -212,13 +195,37 @@ async def chat_completions(
 
     _ = await validate_user_budget(db, user_id)
 
-    provider, model = AnyLLM.split_model_provider(request.model)
+    # Resolve model alias
+    resolved_model = config.model_aliases.get(request.model, request.model)
+
+    provider, model = AnyLLM.split_model_provider(resolved_model)
+
+    # Rate limiting
+    rate_limiter: RateLimiter | None = getattr(config, "_rate_limiter", None)
+    if rate_limiter:
+        allowed, retry_after = rate_limiter.check_rpm(provider.value)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded",
+                headers={"Retry-After": str(int(retry_after))},
+            )
 
     provider_kwargs = _get_provider_kwargs(config, provider)
 
     completion_kwargs = request.model_dump(exclude_none=True)
     completion_kwargs.update(provider_kwargs)
-    _normalize_params(completion_kwargs, model)
+    # Replace request model with resolved model for acompletion
+    completion_kwargs["model"] = resolved_model
+    normalize_params(completion_kwargs, model, provider.value)
+
+    # Cache check (non-streaming only)
+    cache: ResponseCache | None = getattr(config, "_cache", None)
+    no_cache = False  # Could be extended to read Cache-Control header
+    if cache and not request.stream and not no_cache:
+        cached = cache.get(completion_kwargs)
+        if cached is not None:
+            return cached
 
     try:
         if request.stream:
@@ -232,7 +239,6 @@ async def chat_completions(
                     stream: AsyncIterator[ChatCompletionChunk] = await acompletion(**completion_kwargs)  # type: ignore[assignment]
                     async for chunk in stream:
                         if chunk.usage:
-                            # Prompt tokens should be constant, take first non-zero value
                             if chunk.usage.prompt_tokens and not prompt_tokens:
                                 prompt_tokens = chunk.usage.prompt_tokens
                             if chunk.usage.completion_tokens:
@@ -243,7 +249,6 @@ async def chat_completions(
                         yield f"data: {chunk.model_dump_json()}\n\n"
                     yield "data: [DONE]\n\n"
 
-                    # Log aggregated usage
                     if prompt_tokens or completion_tokens or total_tokens:
                         usage_data = CompletionUsage(
                             prompt_tokens=prompt_tokens,
@@ -260,7 +265,6 @@ async def chat_completions(
                             usage_override=usage_data,
                         )
                     else:
-                        # This should never happen.
                         logger.warning(f"No usage data received from streaming response for model {model}")
                 except Exception as e:
                     await _log_usage(
@@ -276,7 +280,14 @@ async def chat_completions(
 
             return StreamingResponse(generate(), media_type="text/event-stream")
 
-        response: ChatCompletion = await acompletion(**completion_kwargs)  # type: ignore[assignment]
+        # Non-streaming: use retry/fallback wrapper
+        circuit_breaker = getattr(config, "_circuit_breaker", None)
+        response, model_used = await call_with_retry_and_fallback(
+            completion_kwargs=completion_kwargs,
+            model=resolved_model,
+            config=config,
+            circuit_breaker=circuit_breaker,
+        )
         await _log_usage(
             db=db,
             api_key_obj=api_key,
@@ -287,7 +298,22 @@ async def chat_completions(
             response=response,
         )
 
+        # Record success for circuit breaker
+        if circuit_breaker:
+            circuit_breaker.record_success(provider.value)
+
+        # Cache the response
+        if cache:
+            cache.put(completion_kwargs, response)
+
+        # If fallback was used, log it
+        if model_used != resolved_model:
+            logger.info(f"Fallback: {resolved_model} → {model_used}")
+
     except Exception as e:
+        # Record failure for circuit breaker
+        if circuit_breaker:
+            circuit_breaker.record_failure(provider.value)
         await _log_usage(
             db=db,
             api_key_obj=api_key,
