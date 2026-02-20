@@ -3,6 +3,7 @@
 from sqlalchemy.orm import Session
 
 from any_llm.any_llm import AnyLLM
+from any_llm.exceptions import UnsupportedProviderError
 from any_llm.gateway.config import GatewayConfig
 from any_llm.gateway.db import ModelPricing
 from any_llm.gateway.log_config import logger
@@ -29,12 +30,17 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
     logger.info(f"Loading pricing configuration for {len(config.pricing)} model(s)")
 
     for model_key, pricing_config in config.pricing.items():
-        provider, _ = AnyLLM.split_model_provider(model_key)
+        try:
+            provider, _ = AnyLLM.split_model_provider(model_key)
+            provider_name = provider.value
+        except (ValueError, UnsupportedProviderError):
+            # Non-LLM provider (e.g., stt)
+            provider_name = model_key.split("/", 1)[0] if "/" in model_key else model_key.split(":", 1)[0]
 
-        if provider.value not in config.providers:
+        if provider_name not in config.providers:
             msg = (
                 f"Cannot set pricing for model '{model_key}': "
-                f"provider '{provider}' is not configured in the providers section"
+                f"provider '{provider_name}' is not configured in the providers section"
             )
             raise ValueError(msg)
 
