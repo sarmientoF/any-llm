@@ -29,12 +29,12 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
 
     logger.info(f"Loading pricing configuration for {len(config.pricing)} model(s)")
 
-    for model_key, pricing_config in config.pricing.items():
+    # Validate providers upfront
+    for model_key in config.pricing:
         try:
             provider, _ = AnyLLM.split_model_provider(model_key)
             provider_name = provider.value
         except (ValueError, UnsupportedProviderError):
-            # Non-LLM provider (e.g., stt)
             provider_name = model_key.split("/", 1)[0] if "/" in model_key else model_key.split(":", 1)[0]
 
         if provider_name not in config.providers:
@@ -44,27 +44,33 @@ def initialize_pricing_from_config(config: GatewayConfig, db: Session) -> None:
             )
             raise ValueError(msg)
 
-        input_price = pricing_config.input_price_per_million
-        output_price = pricing_config.output_price_per_million
+    # Batch check: single SELECT for all configured model keys
+    all_keys = list(config.pricing.keys())
+    existing_keys = {
+        row[0]
+        for row in db.query(ModelPricing.model_key)
+        .filter(ModelPricing.model_key.in_(all_keys))
+        .all()
+    }
 
-        existing_pricing = db.query(ModelPricing).filter(ModelPricing.model_key == model_key).first()
+    # Steady state: all pricing already seeded — skip entirely
+    missing_keys = set(all_keys) - existing_keys
+    if not missing_keys:
+        logger.info(f"Pricing initialization complete (all {len(all_keys)} models already exist)")
+        return
 
-        if existing_pricing:
-            logger.warning(
-                f"Pricing for model '{model_key}' already exists in database. "
-                f"Keeping database value (input: ${existing_pricing.input_price_per_million}/M, "
-                f"output: ${existing_pricing.output_price_per_million}/M). "
-                f"To update, use the pricing API or delete the existing entry."
-            )
-            continue
-
-        new_pricing = ModelPricing(
+    for model_key in missing_keys:
+        pricing_config = config.pricing[model_key]
+        db.add(ModelPricing(
             model_key=model_key,
-            input_price_per_million=input_price,
-            output_price_per_million=output_price,
+            input_price_per_million=pricing_config.input_price_per_million,
+            output_price_per_million=pricing_config.output_price_per_million,
+        ))
+        logger.info(
+            f"Added pricing for '{model_key}': "
+            f"input=${pricing_config.input_price_per_million}/M, "
+            f"output=${pricing_config.output_price_per_million}/M"
         )
-        db.add(new_pricing)
-        logger.info(f"Added pricing for '{model_key}': input=${input_price}/M, output=${output_price}/M")
 
     db.commit()
-    logger.info("Pricing initialization complete")
+    logger.info(f"Pricing initialization complete ({len(missing_keys)} added, {len(existing_keys)} existing)")

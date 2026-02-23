@@ -6,6 +6,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from any_llm.gateway.db.models import Base
+
 _engine = None
 _SessionLocal = None
 
@@ -15,7 +17,8 @@ def init_db(database_url: str, auto_migrate: bool = True) -> None:
 
     Args:
         database_url: Database connection URL
-        auto_migrate: If True, automatically run migrations to head. If False, skip migrations.
+        auto_migrate: If True, automatically run migrations to head.
+            If False, use fast idempotent DDL (create_all) instead.
     """
     global _engine, _SessionLocal  # noqa: PLW0603
 
@@ -29,6 +32,10 @@ def init_db(database_url: str, auto_migrate: bool = True) -> None:
         alembic_cfg.set_main_option("sqlalchemy.url", database_url)
 
         command.upgrade(alembic_cfg, "head")
+    else:
+        # Fast idempotent DDL — skips alembic overhead but still ensures
+        # tables exist (handles fresh databases).
+        Base.metadata.create_all(bind=_engine)
 
 
 def get_db() -> Generator[Session]:
