@@ -202,13 +202,12 @@ class SelfHostedHandler(STTHandler):
 # ---------------------------------------------------------------------------
 
 STT_PROVIDERS: dict[str, STTHandler] = {
+    "stt": SelfHostedHandler(),
     "openai": OpenAICompatHandler("https://api.openai.com/v1"),
     "groq": OpenAICompatHandler("https://api.groq.com/openai/v1"),
     "fireworks": OpenAICompatHandler("https://api.fireworks.ai/inference/v1"),
     "deepgram": DeepgramHandler(),
 }
-
-_SELF_HOSTED = SelfHostedHandler()
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +320,10 @@ def _resolve_stt_backend(
     # 1. Self-hosted STT (explicit stt/ prefix)
     if model.startswith("stt/"):
         model_name = model[len("stt/") :]
+        handler = STT_PROVIDERS["stt"]
         stt_base = config.providers.get("stt", {}).get("api_base", "")
-        url = _SELF_HOSTED.get_url(model_name, stt_base or None)
-        return _SELF_HOSTED, url, "", "stt", model_name
+        url = handler.get_url(model_name, stt_base or None)
+        return handler, url, "", "stt", model_name
 
     # 2. Try provider/model split
     if "/" in model:
@@ -350,10 +350,11 @@ def _resolve_stt_backend(
             return handler, url, provider_cfg["api_key"], provider, model_name
 
     # 3. Unprefixed or unresolved provider → self-hosted fallback
+    handler = STT_PROVIDERS["stt"]
     fallback_name = model.split("/", 1)[-1] if "/" in model else model
     stt_base = config.providers.get("stt", {}).get("api_base", "")
-    url = _SELF_HOSTED.get_url(fallback_name, stt_base or None)
-    return _SELF_HOSTED, url, "", "stt", fallback_name
+    url = handler.get_url(fallback_name, stt_base or None)
+    return handler, url, "", "stt", fallback_name
 
 
 # ---------------------------------------------------------------------------
