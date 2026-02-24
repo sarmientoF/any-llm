@@ -387,6 +387,12 @@ async def audio_transcriptions(
     handler, url, api_key_str, provider, model_name = _resolve_stt_backend(stt_req.model, config)
     log_id = str(uuid.uuid4())
 
+    # Force verbose_json upstream to get duration metadata for cost tracking.
+    # We'll downgrade the response back to the client's requested format.
+    client_format = stt_req.response_format
+    if client_format == "json":
+        stt_req.response_format = "verbose_json"
+
     # Handler builds the upstream request from structured fields
     content, files, headers = handler.build_request(stt_req, model_name, api_key_str)
 
@@ -440,7 +446,12 @@ async def audio_transcriptions(
         duration_ms=duration_ms,
         cost=cost,
     )
-    return result.raw_response
+
+    # Downgrade response if we upgraded format for cost tracking
+    response = result.raw_response
+    if client_format == "json" and isinstance(response, dict):
+        response = {"text": response.get("text", "")}
+    return response
 
 
 def _write_log(

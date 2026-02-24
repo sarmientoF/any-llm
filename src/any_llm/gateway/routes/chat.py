@@ -237,6 +237,8 @@ async def chat_completions(
 
     try:
         if request.stream:
+            # Request usage data in the final streaming chunk
+            completion_kwargs.setdefault("stream_options", {"include_usage": True})
 
             async def generate() -> AsyncIterator[str]:
                 prompt_tokens = 0
