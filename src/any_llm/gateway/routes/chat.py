@@ -227,6 +227,14 @@ async def chat_completions(
     request_fields = request.model_dump(exclude_unset=True)
     completion_kwargs = {**provider_kwargs, **request_fields}
 
+    # Clamp max_tokens / max_completion_tokens to model limits
+    model_key = f"{provider.value}/{model}"
+    limits = config.model_limits.get(model_key)
+    if limits and limits.max_completion_tokens:
+        for key in ("max_tokens", "max_completion_tokens"):
+            if key in completion_kwargs and completion_kwargs[key] > limits.max_completion_tokens:
+                completion_kwargs[key] = limits.max_completion_tokens
+
     try:
         if request.stream:
 

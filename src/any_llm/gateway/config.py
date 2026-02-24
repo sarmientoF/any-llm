@@ -16,6 +16,13 @@ class PricingConfig(BaseModel):
     output_price_per_million: float = Field(ge=0)
 
 
+class ModelLimitsConfig(BaseModel):
+    """Model output and context limits."""
+
+    max_completion_tokens: int | None = None
+    context_window: int | None = None
+
+
 class GatewayConfig(BaseSettings):
     """Gateway configuration with support for YAML files and environment variables."""
 
@@ -49,6 +56,10 @@ class GatewayConfig(BaseSettings):
     pricing: dict[str, PricingConfig] = Field(
         default_factory=dict,
         description="Pre-configured model USD pricing (model_key -> {input_price_per_million, output_price_per_million})",
+    )
+    model_limits: dict[str, ModelLimitsConfig] = Field(
+        default_factory=dict,
+        description="Per-model output token and context window limits (model_key -> limits)",
     )
 
 
